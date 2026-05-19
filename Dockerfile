@@ -16,6 +16,6 @@ COPY app.py .
 # Create temp directory
 RUN mkdir -p /tmp/videos
 
-EXPOSE 8000
+EXPOSE 3000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]
