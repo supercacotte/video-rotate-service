@@ -339,20 +339,27 @@ async def process_video(job_id: str, req: RotateRequest):
             set_step("uploading", f"{file_size} bytes")
 
             try:
-                # Stream the file — do NOT read it all into memory
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(30.0, read=1200.0, write=1200.0),
-                ) as client:
-                    with open(output_path, "rb") as f:
-                        resp = await client.put(
-                            webdav_dest,
-                            content=f,
-                            auth=(req.webdav_username, req.webdav_password),
-                            headers={
-                                "Content-Type": "video/mp4",
-                                "Content-Length": str(file_size),
-                            },
-                        )
+                # httpx.AsyncClient does NOT support sync file objects as `content`
+                # (it raises RuntimeError / ReadError mid-upload). The clean fix
+                # is to run a sync httpx.Client in a worker thread — the sync
+                # client streams file objects natively, and to_thread keeps the
+                # event loop free.
+                def sync_upload() -> httpx.Response:
+                    with httpx.Client(
+                        timeout=httpx.Timeout(30.0, read=1200.0, write=1200.0),
+                    ) as client:
+                        with open(output_path, "rb") as f:
+                            return client.put(
+                                webdav_dest,
+                                content=f,
+                                auth=(req.webdav_username, req.webdav_password),
+                                headers={
+                                    "Content-Type": "video/mp4",
+                                    "Content-Length": str(file_size),
+                                },
+                            )
+
+                resp = await asyncio.to_thread(sync_upload)
 
                 if resp.status_code not in (200, 201, 204):
                     jobs[job_id]["status"] = "error"
