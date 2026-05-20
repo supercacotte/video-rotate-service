@@ -116,7 +116,7 @@ async def process_video(job_id: str, request: RotateRequest):
             jobs[job_id]["error"] = f"FFmpeg failed: {stderr.decode()[-300:]}"
             return
 
-        # Step 3: Upload to WebDAV if configured
+        # Step 3: Upload to WebDAV using curl (httpx can't stream sync files)
         if request.webdav_url and request.webdav_username and request.webdav_password:
             jobs[job_id]["step"] = "uploading"
             webdav_dest = request.webdav_url.rstrip("/") + "/" + output_filename
@@ -125,21 +125,28 @@ async def process_video(job_id: str, request: RotateRequest):
                 file_size = os.path.getsize(output_path)
                 jobs[job_id]["error"] = f"Uploading {file_size} bytes to {webdav_dest}"
 
-                async with httpx.AsyncClient(timeout=1200) as client:
-                    with open(output_path, "rb") as f:
-                        resp = await client.put(
-                            webdav_dest,
-                            content=f,
-                            auth=(request.webdav_username, request.webdav_password),
-                            headers={
-                                "Content-Type": "video/mp4",
-                                "Content-Length": str(file_size)
-                            }
-                        )
-                    if resp.status_code not in (200, 201, 204):
-                        jobs[job_id]["status"] = "error"
-                        jobs[job_id]["error"] = f"WebDAV upload failed: HTTP {resp.status_code} - {resp.text[:500]}"
-                        return
+                curl_cmd = [
+                    "curl", "-X", "PUT",
+                    "-u", f"{request.webdav_username}:{request.webdav_password}",
+                    "-H", "Content-Type: video/mp4",
+                    "-T", output_path,
+                    "--max-time", "1200",
+                    "-s", "-w", "%{http_code}",
+                    webdav_dest
+                ]
+
+                proc = await asyncio.create_subprocess_exec(
+                    *curl_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout_curl, stderr_curl = await proc.communicate()
+                http_code = stdout_curl.decode().strip()
+
+                if http_code not in ("200", "201", "204"):
+                    jobs[job_id]["status"] = "error"
+                    jobs[job_id]["error"] = f"WebDAV upload failed: HTTP {http_code} - {stderr_curl.decode()[:300]}"
+                    return
 
             except Exception as e:
                 jobs[job_id]["status"] = "error"
