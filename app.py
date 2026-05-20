@@ -56,7 +56,7 @@ async def process_video(job_id: str, request: RotateRequest):
                     async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
                         f.write(chunk)
 
-        # Step 2: Rotate with ffmpeg
+        # Step 2: Rotate with ffmpeg (ultrafast preset for speed)
         jobs[job_id]["step"] = "rotating"
         vf_filter = get_transpose_value(request.rotation)
         cmd = [
@@ -64,6 +64,7 @@ async def process_video(job_id: str, request: RotateRequest):
             "-i", input_path,
             "-vf", vf_filter,
             "-c:a", "copy",
+            "-preset", "ultrafast",
             "-movflags", "+faststart",
             output_path
         ]
