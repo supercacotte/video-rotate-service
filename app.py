@@ -127,15 +127,16 @@ async def process_video(job_id: str, request: RotateRequest):
 
                 async with httpx.AsyncClient(timeout=1200) as client:
                     with open(output_path, "rb") as f:
-                        resp = await client.put(
-                            webdav_dest,
-                            content=f,
-                            auth=(request.webdav_username, request.webdav_password),
-                            headers={
-                                "Content-Type": "video/mp4",
-                                "Content-Length": str(file_size)
-                            }
-                        )
+                        file_data = f.read()
+                    resp = await client.put(
+                        webdav_dest,
+                        content=file_data,
+                        auth=(request.webdav_username, request.webdav_password),
+                        headers={
+                            "Content-Type": "video/mp4",
+                            "Content-Length": str(file_size)
+                        }
+                    )
                     if resp.status_code not in (200, 201, 204):
                         jobs[job_id]["status"] = "error"
                         jobs[job_id]["error"] = f"WebDAV upload failed: HTTP {resp.status_code} - {resp.text[:500]}"
