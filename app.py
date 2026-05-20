@@ -1,7 +1,7 @@
 import os
 import uuid
 import asyncio
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict
@@ -125,15 +125,17 @@ async def process_video(job_id: str, request: RotateRequest):
                 file_size = os.path.getsize(output_path)
                 jobs[job_id]["error"] = f"Uploading {file_size} bytes to {webdav_dest}"
 
-                async with httpx.AsyncClient(timeout=600) as client:
+                async with httpx.AsyncClient(timeout=1200) as client:
                     with open(output_path, "rb") as f:
-                        file_data = f.read()
-                    resp = await client.put(
-                        webdav_dest,
-                        content=file_data,
-                        auth=(request.webdav_username, request.webdav_password),
-                        headers={"Content-Type": "video/mp4"}
-                    )
+                        resp = await client.put(
+                            webdav_dest,
+                            content=f,
+                            auth=(request.webdav_username, request.webdav_password),
+                            headers={
+                                "Content-Type": "video/mp4",
+                                "Content-Length": str(file_size)
+                            }
+                        )
                     if resp.status_code not in (200, 201, 204):
                         jobs[job_id]["status"] = "error"
                         jobs[job_id]["error"] = f"WebDAV upload failed: HTTP {resp.status_code} - {resp.text[:500]}"
