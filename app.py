@@ -1,7 +1,7 @@
 import os
 import uuid
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict
@@ -12,15 +12,25 @@ app = FastAPI(title="Video Rotate & Serve")
 UPLOAD_DIR = "/tmp/videos"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ===== CONFIG =====
+# Set these as environment variables in Coolify, or hardcode for now
 KOOFR_USERNAME = os.getenv("KOOFR_USERNAME", "")
 KOOFR_PASSWORD = os.getenv("KOOFR_PASSWORD", "")
 KOOFR_BASE_URL = "https://app.koofr.net/dav/Google%20Drive"
 
+# In-memory job tracker
 jobs: Dict[str, dict] = {}
 
 
+# ===== SERVE ENDPOINT (proxy Koofr -> public URL) =====
+
 @app.get("/serve/{file_path:path}")
 async def serve_file(file_path: str):
+    """
+    Proxy a file from Koofr WebDAV as a public URL.
+    Usage: /serve/Episodes%20%C3%A0%20publier/video.mp4
+    This becomes: https://app.koofr.net/dav/Google%20Drive/Episodes%20%C3%A0%20publier/video.mp4
+    """
     if not KOOFR_USERNAME or not KOOFR_PASSWORD:
         raise HTTPException(status_code=500, detail="Koofr credentials not configured")
 
@@ -50,6 +60,8 @@ async def serve_file(file_path: str):
         }
     )
 
+
+# ===== ROTATE ENDPOINTS =====
 
 class RotateRequest(BaseModel):
     url: str
@@ -116,47 +128,28 @@ async def process_video(job_id: str, request: RotateRequest):
             jobs[job_id]["error"] = f"FFmpeg failed: {stderr.decode()[-300:]}"
             return
 
-        # Step 3: Upload to WebDAV using curl (httpx can't stream sync files)
+        # Step 3: Upload to WebDAV if configured
         if request.webdav_url and request.webdav_username and request.webdav_password:
             jobs[job_id]["step"] = "uploading"
             webdav_dest = request.webdav_url.rstrip("/") + "/" + output_filename
 
-            try:
-                file_size = os.path.getsize(output_path)
-                jobs[job_id]["error"] = f"Uploading {file_size} bytes to {webdav_dest}"
-
-                curl_cmd = [
-                    "curl", "-X", "PUT",
-                    "-u", f"{request.webdav_username}:{request.webdav_password}",
-                    "-H", "Content-Type: video/mp4",
-                    "-T", output_path,
-                    "--max-time", "1200",
-                    "-s", "-w", "%{http_code}",
-                    webdav_dest
-                ]
-
-                proc = await asyncio.create_subprocess_exec(
-                    *curl_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+            async with httpx.AsyncClient(timeout=600) as client:
+                with open(output_path, "rb") as f:
+                    file_data = f.read()
+                resp = await client.put(
+                    webdav_dest,
+                    content=file_data,
+                    auth=(request.webdav_username, request.webdav_password),
+                    headers={"Content-Type": "video/mp4"}
                 )
-                stdout_curl, stderr_curl = await proc.communicate()
-                http_code = stdout_curl.decode().strip()
-
-                if http_code not in ("200", "201", "204"):
+                if resp.status_code not in (200, 201, 204):
                     jobs[job_id]["status"] = "error"
-                    jobs[job_id]["error"] = f"WebDAV upload failed: HTTP {http_code} - {stderr_curl.decode()[:300]}"
+                    jobs[job_id]["error"] = f"WebDAV upload failed: {resp.status_code}"
                     return
-
-            except Exception as e:
-                jobs[job_id]["status"] = "error"
-                jobs[job_id]["error"] = f"Upload exception: {type(e).__name__}: {str(e)}"
-                return
 
             jobs[job_id]["status"] = "done"
             jobs[job_id]["step"] = "complete"
             jobs[job_id]["output"] = webdav_dest
-            jobs[job_id]["error"] = None
         else:
             jobs[job_id]["status"] = "done"
             jobs[job_id]["step"] = "complete"
@@ -164,7 +157,7 @@ async def process_video(job_id: str, request: RotateRequest):
 
     except Exception as e:
         jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = f"General error: {type(e).__name__}: {str(e)}"
+        jobs[job_id]["error"] = str(e)
     finally:
         if os.path.exists(input_path):
             os.remove(input_path)
