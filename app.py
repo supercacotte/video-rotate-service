@@ -1,19 +1,67 @@
 import os
 import uuid
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict
 import httpx
 
-app = FastAPI(title="Video Rotate Service (Async)")
+app = FastAPI(title="Video Rotate & Serve")
 
 UPLOAD_DIR = "/tmp/videos"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ===== CONFIG =====
+# Set these as environment variables in Coolify, or hardcode for now
+KOOFR_USERNAME = os.getenv("KOOFR_USERNAME", "")
+KOOFR_PASSWORD = os.getenv("KOOFR_PASSWORD", "")
+KOOFR_BASE_URL = "https://app.koofr.net/dav/Google%20Drive"
+
 # In-memory job tracker
 jobs: Dict[str, dict] = {}
 
+
+# ===== SERVE ENDPOINT (proxy Koofr -> public URL) =====
+
+@app.get("/serve/{file_path:path}")
+async def serve_file(file_path: str):
+    """
+    Proxy a file from Koofr WebDAV as a public URL.
+    Usage: /serve/Episodes%20%C3%A0%20publier/video.mp4
+    This becomes: https://app.koofr.net/dav/Google%20Drive/Episodes%20%C3%A0%20publier/video.mp4
+    """
+    if not KOOFR_USERNAME or not KOOFR_PASSWORD:
+        raise HTTPException(status_code=500, detail="Koofr credentials not configured")
+
+    koofr_url = f"{KOOFR_BASE_URL}/{file_path}"
+
+    async def stream_from_koofr():
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=600,
+            auth=(KOOFR_USERNAME, KOOFR_PASSWORD)
+        ) as client:
+            async with client.stream("GET", koofr_url) as response:
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Koofr returned {response.status_code}"
+                    )
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                    yield chunk
+
+    return StreamingResponse(
+        stream_from_koofr(),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f"inline; filename={file_path.split('/')[-1]}",
+            "Accept-Ranges": "bytes"
+        }
+    )
+
+
+# ===== ROTATE ENDPOINTS =====
 
 class RotateRequest(BaseModel):
     url: str
@@ -37,7 +85,6 @@ def get_transpose_value(rotation: str) -> str:
 
 
 async def process_video(job_id: str, request: RotateRequest):
-    """Background task: download, rotate, upload."""
     input_path = os.path.join(UPLOAD_DIR, f"{job_id}_input.mp4")
     output_filename = request.output_filename or f"{job_id}_output.mp4"
     output_path = os.path.join(UPLOAD_DIR, output_filename)
@@ -56,7 +103,7 @@ async def process_video(job_id: str, request: RotateRequest):
                     async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
                         f.write(chunk)
 
-        # Step 2: Rotate with ffmpeg (ultrafast preset for speed)
+        # Step 2: Rotate with ffmpeg
         jobs[job_id]["step"] = "rotating"
         vf_filter = get_transpose_value(request.rotation)
         cmd = [
